@@ -150,7 +150,7 @@ function getSubagentRuns(): Map<string, StoredSubagentExecution> {
 }
 
 /**
- * Background runs whose completion `notifyParent()` is still delivering: the run has left the
+ * Runs whose completion `notifyParent()` is still delivering: the run has left the
  * run map, but the parent's turn starts only once the parent is ready and idle.
  */
 function getParentNotifications(): Set<Pick<SubagentRunInfo, "sessionId" | "parentSessionId">> {
@@ -186,14 +186,15 @@ function getSubagentQueue(): SubagentQueue<SubagentRunInfo> {
 type SubagentRunIdentity = Pick<SubagentRunInfo, "sessionId" | "completedAt">;
 
 /**
- * Background runs whose terminal result the parent already collected with `get_subagent_result`,
+ * Runs whose terminal result the parent already collected with `get_subagent_result`,
  * keyed by subagent session ID and holding the collected run's `completedAt`. `resume` reruns
  * the same session ID, so the mark must name the run: a parent that polls *after* a run's
  * notification was delivered leaves a mark nothing consumes, and a bare session ID would let it
  * swallow the next run's notification (#987). `resume` deliberately does not clear the entry:
  * the parent can collect a run and resume it in the same turn while that run's notification is
- * still held, and the mark must keep suppressing it. Only background runs are recorded — a
- * foreground run never notifies — and each session holds at most one entry.
+ * still held, and the mark must keep suppressing it. A foreground run whose Agent wait expired
+ * also notifies; collecting any terminal run can suppress its report. Each session holds at most
+ * one entry.
  */
 function getConsumedSubagentResults(): Map<string, string> {
   // A hot reload can leave the pre-#987 Set on globalThis; replace it rather than call Map methods on it.
@@ -562,7 +563,10 @@ export function createSubagentController(
         else if (stored.mcpWait) stored.mcpWait.abort();
         else void inner.abort();
       };
-      if (!runInBackground) request.signal?.addEventListener("abort", handleParentAbort, { once: true });
+      if (!runInBackground) {
+        if (request.signal?.aborted) handleParentAbort();
+        else request.signal?.addEventListener("abort", handleParentAbort, { once: true });
+      }
 
       const execute = async (): Promise<SubagentRunInfo> => {
         // Reached only when the abort fires while the run is being queued, before `cancelQueued`
@@ -698,6 +702,7 @@ export function createSubagentController(
         finishQueuedAbort,
       );
       stored.cancelQueued = queued.cancel;
+      if (stored.abortRequested) queued.cancel();
       void queued.promise.then(resolveCompletion, (error) => {
         resolveCompletion({ ...initialRun, status: "failed", completedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) });
       });
@@ -762,7 +767,10 @@ export function createSubagentController(
       else if (stored.mcpWait) stored.mcpWait.abort();
       else void wrapper!.inner.abort();
     };
-    if (!runInBackground) request.signal?.addEventListener("abort", handleParentAbort, { once: true });
+    if (!runInBackground) {
+      if (request.signal?.aborted) handleParentAbort();
+      else request.signal?.addEventListener("abort", handleParentAbort, { once: true });
+    }
 
     const execute = async (): Promise<SubagentRunInfo> => {
       if (stored.abortRequested) {
@@ -823,6 +831,7 @@ export function createSubagentController(
       dependencies.invalidateSessionList();
     }, finishQueuedAbort);
     stored.cancelQueued = queued.cancel;
+    if (stored.abortRequested) queued.cancel();
     void queued.promise.then(resolveCompletion, (error) => resolveCompletion({ ...initialRun, status: "failed", completedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) }));
     return { run: stored.run, completion };
   }
